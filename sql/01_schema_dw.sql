@@ -98,7 +98,8 @@ CREATE TABLE dim_autor (
     id_autor_oltp INT NULL,                 -- ID original em users (NULL para anônimos)
     nome_autor VARCHAR(255) NOT NULL,
     faixa_contribuicoes VARCHAR(50) NOT NULL DEFAULT 'Sem revisões',
-    PRIMARY KEY (sk_autor)
+    PRIMARY KEY (sk_autor),
+    KEY idx_autor_oltp (id_autor_oltp)
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------
@@ -107,7 +108,7 @@ CREATE TABLE dim_autor (
 CREATE TABLE dim_pagina (
     sk_pagina INT AUTO_INCREMENT NOT NULL,
     id_pagina_oltp INT NOT NULL,            -- ID original em pages
-    titulo VARCHAR(255) NOT NULL,
+    titulo VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
     slug VARCHAR(255) NULL,
     categoria_nome VARCHAR(255) NOT NULL DEFAULT 'Não categorizado',
     eh_redirect TINYINT(1) NOT NULL DEFAULT 0,

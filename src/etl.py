@@ -37,6 +37,8 @@ TIPOS_LINK = {
     "C": "Categoria",
     "I": "Imagem / inclusão",
     "R": "Redirecionamento",
+    "F": "Arquivo / anexo",
+    "W": "Link externo / interwiki",
 }
 
 
@@ -73,34 +75,54 @@ def table_exists(conn, schema, table):
                         f"WHERE table_schema='{schema}' AND table_name='{table}'") > 0
 
 
+def column_exists(conn, schema, table, column):
+    return scalar(conn, f"SELECT COUNT(*) FROM information_schema.columns "
+                        f"WHERE table_schema='{schema}' AND table_name='{table}' "
+                        f"AND column_name='{column}'") > 0
+
+
 # ---------------------------------------------------------------------
 # Staging
 # ---------------------------------------------------------------------
 def load_staging(conn, has_refs):
     t0 = time.time()
     log_step("Staging: revisões (tamanho do conteúdo)")
+    has_rev_author = column_exists(conn, "nlab_db", "revisions", "author")
+    author_expr = "NULLIF(TRIM(r.author), '')" if has_rev_author else "NULL"
+    lo = scalar(conn, "SELECT COALESCE(MIN(id),0) FROM nlab_db.revisions")
+    hi = scalar(conn, "SELECT COALESCE(MAX(id),0) FROM nlab_db.revisions")
+    n = 0
     with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO nlab_dw.stg_revisao
-                (id, page_id, author_id, author_nome, created_at, tamanho)
-            SELECT r.id, r.page_id, r.author_id, NULLIF(TRIM(r.author), ''),
-                   r.created_at, COALESCE(CHAR_LENGTH(r.content), 0)
-            FROM nlab_db.revisions r
-        """)
-        n = cur.rowcount
+        start = lo
+        while start <= hi:
+            end = start + BATCH_REF - 1
+            cur.execute(f"""
+                INSERT INTO nlab_dw.stg_revisao
+                    (id, page_id, author_id, author_nome, created_at, tamanho)
+                SELECT r.id, r.page_id, r.author_id, {author_expr},
+                       r.created_at, COALESCE(CHAR_LENGTH(r.content), 0)
+                FROM nlab_db.revisions r
+                WHERE r.id BETWEEN %s AND %s
+            """, (start, end))
+            n += cur.rowcount
+            log_step(f"  lote revisões {start:,}..{min(end, hi):,}: {n:,} acumulado")
+            start = end + 1
     log_step(f"stg_revisao ({n:,} linhas)", t0)
 
     t0 = time.time()
     log_step("Staging: categoria real de cada página")
+    has_page_cat = column_exists(conn, "nlab_db", "pages", "category_id")
     with conn.cursor() as cur:
         # 1) categoria pelo próprio cadastro da página (se existir)
-        cur.execute("""
-            INSERT INTO nlab_dw.stg_categoria_pagina (page_id, categoria_nome)
-            SELECT p.id, MIN(c.name)
-            FROM nlab_db.pages p JOIN nlab_db.categories c ON c.id = p.category_id
-            GROUP BY p.id
-        """)
-        n1 = cur.rowcount
+        n1 = 0
+        if has_page_cat:
+            cur.execute("""
+                INSERT INTO nlab_dw.stg_categoria_pagina (page_id, categoria_nome)
+                SELECT p.id, MIN(c.name)
+                FROM nlab_db.pages p JOIN nlab_db.categories c ON c.id = p.category_id
+                GROUP BY p.id
+            """)
+            n1 = cur.rowcount
         # 2) categoria via link tipo 'C' em wiki_references (nomes deduplicados)
         n2 = 0
         if has_refs:
@@ -174,13 +196,16 @@ def populate_dim_autor(conn):
 def populate_dim_pagina(conn):
     t0 = time.time()
     log_step("dim_pagina")
+    slug_expr = "p.slug" if column_exists(conn, "nlab_db", "pages", "slug") else "NULL"
+    redir_expr = ("COALESCE(p.is_redirect, 0)"
+                  if column_exists(conn, "nlab_db", "pages", "is_redirect") else "0")
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             INSERT INTO nlab_dw.dim_pagina
                 (id_pagina_oltp, titulo, slug, categoria_nome, eh_redirect)
-            SELECT p.id, p.name, p.slug,
+            SELECT p.id, p.name, {slug_expr},
                    COALESCE(sc.categoria_nome, 'Não categorizado'),
-                   COALESCE(p.is_redirect, 0)
+                   {redir_expr}
             FROM nlab_db.pages p
             LEFT JOIN nlab_dw.stg_categoria_pagina sc ON sc.page_id = p.id
         """)
@@ -243,7 +268,7 @@ def populate_fato_revisao(conn):
             LEFT JOIN nlab_dw.dim_autor da_id ON da_id.id_autor_oltp = s.author_id
             LEFT JOIN (SELECT nome_autor, MIN(sk_autor) AS sk_autor
                        FROM nlab_dw.dim_autor GROUP BY nome_autor) da_nome
-                   ON da_nome.nome_autor = s.author_nome
+                   ON s.author_nome IS NOT NULL AND da_nome.nome_autor = s.author_nome
         """)
         n = cur.rowcount
     log_step(f"fato_revisao ({n:,} fatos)", t0)
@@ -264,21 +289,24 @@ def populate_fato_referencia(conn):
         """)
         total = 0
         start = lo
-        # destino resolvido por nome (target_page_id vem NULL no OLTP);
-        # apenas links L (interno) e R (redirect) apontam para verbetes.
+        # destino resolvido via target_page_id (quando preenchido) ou por nome
+        # binário exato para links L (interno), R (redirect) e I (inclusão).
         while start <= hi:
             end = start + BATCH_REF - 1
             cur.execute("""
                 INSERT INTO nlab_dw.fato_referencia
                     (sk_pagina_origem, sk_pagina_destino, sk_tipo_link,
                      id_referencia_oltp, qtd_links, eh_destino_resolvido)
-                SELECT po.sk_pagina, pd.sk_pagina, tl.sk_tipo_link, w.id, 1,
-                       IF(pd.sk_pagina IS NULL, 0, 1)
+                SELECT po.sk_pagina, COALESCE(pt.sk_pagina, pd.sk_pagina), tl.sk_tipo_link, w.id, 1,
+                       IF(COALESCE(pt.sk_pagina, pd.sk_pagina) IS NULL, 0, 1)
                 FROM nlab_db.wiki_references w
                 JOIN nlab_dw.dim_pagina po ON po.id_pagina_oltp = w.page_id
                 JOIN nlab_dw.dim_tipo_link tl ON tl.codigo_oltp = COALESCE(w.link_type, 'N/D')
+                LEFT JOIN nlab_dw.dim_pagina pt ON pt.id_pagina_oltp = w.target_page_id
                 LEFT JOIN nlab_dw.dim_pagina pd
-                       ON w.link_type IN ('L', 'R') AND pd.titulo = w.referenced_name
+                       ON w.target_page_id IS NULL
+                      AND w.link_type IN ('L', 'R', 'I')
+                      AND pd.titulo = CONVERT(w.referenced_name USING utf8mb4) COLLATE utf8mb4_bin
                 WHERE w.id BETWEEN %s AND %s
             """, (start, end))
             total += cur.rowcount
