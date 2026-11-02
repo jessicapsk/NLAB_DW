@@ -12,29 +12,45 @@ import time
 
 import pymysql
 
-BENCH = [
-    ("B1 - Revisões por ano/mês",
-     """SELECT YEAR(created_at) a, MONTH(created_at) m, COUNT(*) n
-        FROM nlab_db.revisions GROUP BY a, m""",
-     """SELECT t.ano, t.mes, SUM(f.qtd_revisoes)
-        FROM nlab_dw.fato_revisao f JOIN nlab_dw.dim_tempo t ON t.sk_tempo = f.sk_tempo
-        GROUP BY t.ano, t.mes"""),
-    ("B2 - Revisões por categoria",
-     """SELECT c.name, COUNT(*) n
-        FROM nlab_db.revisions r
-        JOIN nlab_db.wiki_references w ON w.page_id = r.page_id AND w.link_type = 'C'
-        JOIN nlab_db.categories c ON c.id = w.category_id
-        GROUP BY c.name""",
-     """SELECT p.categoria_nome, SUM(f.qtd_revisoes)
-        FROM nlab_dw.fato_revisao f JOIN nlab_dw.dim_pagina p ON p.sk_pagina = f.sk_pagina
-        GROUP BY p.categoria_nome"""),
-    ("B3 - Revisões por autor",
-     """SELECT u.name, COUNT(*) n FROM nlab_db.revisions r
-        JOIN nlab_db.users u ON u.id = r.author_id GROUP BY u.name""",
-     """SELECT a.nome_autor, SUM(f.qtd_revisoes)
-        FROM nlab_dw.fato_revisao f JOIN nlab_dw.dim_autor a ON a.sk_autor = f.sk_autor
-        GROUP BY a.nome_autor"""),
-]
+def oltp_ignore_clauses(cur, enabled):
+    if not enabled:
+        return {t: "" for t in ("revisions", "wiki_references", "categories", "users")}
+    clauses = {}
+    for tbl in ("revisions", "wiki_references", "categories", "users"):
+        cur.execute("""
+            SELECT DISTINCT index_name FROM information_schema.statistics
+            WHERE table_schema = 'nlab_db' AND table_name = %s AND index_name <> 'PRIMARY'
+            ORDER BY index_name
+        """, (tbl,))
+        idxs = [f"`{r[0]}`" for r in cur.fetchall()]
+        clauses[tbl] = f"IGNORE INDEX ({', '.join(idxs)})" if idxs else ""
+    return clauses
+
+
+def build_bench(ig):
+    return [
+        ("B1 - Revisões por ano/mês",
+         f"""SELECT YEAR(created_at) a, MONTH(created_at) m, COUNT(*) n
+            FROM nlab_db.revisions {ig['revisions']} GROUP BY a, m""",
+         """SELECT t.ano, t.mes, SUM(f.qtd_revisoes)
+            FROM nlab_dw.fato_revisao f JOIN nlab_dw.dim_tempo t ON t.sk_tempo = f.sk_tempo
+            GROUP BY t.ano, t.mes"""),
+        ("B2 - Revisões por categoria",
+         f"""SELECT c.name, COUNT(*) n
+            FROM nlab_db.revisions r {ig['revisions']}
+            JOIN nlab_db.wiki_references w {ig['wiki_references']} ON w.page_id = r.page_id AND w.link_type = 'C'
+            JOIN nlab_db.categories c {ig['categories']} ON c.id = w.category_id
+            GROUP BY c.name""",
+         """SELECT p.categoria_nome, SUM(f.qtd_revisoes)
+            FROM nlab_dw.fato_revisao f JOIN nlab_dw.dim_pagina p ON p.sk_pagina = f.sk_pagina
+            GROUP BY p.categoria_nome"""),
+        ("B3 - Revisões por autor",
+         f"""SELECT u.name, COUNT(*) n FROM nlab_db.revisions r {ig['revisions']}
+            JOIN nlab_db.users u {ig['users']} ON u.id = r.author_id GROUP BY u.name""",
+         """SELECT a.nome_autor, SUM(f.qtd_revisoes)
+            FROM nlab_dw.fato_revisao f JOIN nlab_dw.dim_autor a ON a.sk_autor = f.sk_autor
+            GROUP BY a.nome_autor"""),
+    ]
 
 
 def timed(cur, sql, runs, timeout):
@@ -69,19 +85,23 @@ def main():
     ap.add_argument("--runs", type=int, default=3, help="execuções no DW (mediana)")
     ap.add_argument("--oltp-runs", type=int, default=1, help="execuções no OLTP (mediana)")
     ap.add_argument("--timeout", type=int, default=600, help="timeout por consulta (s)")
+    ap.add_argument("--no-oltp-indexes", action="store_true",
+                    help="ignora índices secundários nas tabelas do OLTP (IGNORE INDEX)")
     ap.add_argument("--out", default="docs/benchmark.md")
     a = ap.parse_args()
     if a.password is None:
         sys.exit("Defina NLAB_DB_PASSWORD.")
     conn = pymysql.connect(host=a.host, port=a.port, user=a.user, password=a.password,
                            charset="utf8mb4", read_timeout=7200)
+    idx_note = " (índices secundários do OLTP ignorados)" if a.no_oltp_indexes else ""
     lines = ["# Benchmark OLTP x OLAP", "",
-             f"Mesmo servidor MariaDB. Mediana de {a.runs} execuções no DW e de "
+             f"Mesmo servidor MariaDB{idx_note}. Mediana de {a.runs} execuções no DW e de "
              f"{a.oltp_runs} no OLTP (timeout de {a.timeout}s por consulta).", "",
              "| Consulta | OLTP (s) | DW (s) | Speedup |", "|---|---:|---:|---:|"]
     detail = ["", "## Planos de execução (tabela:tipo/chave/linhas estimadas)", ""]
     with conn.cursor() as cur:
-        for nome, oltp, dw in BENCH:
+        bench = build_bench(oltp_ignore_clauses(cur, a.no_oltp_indexes))
+        for nome, oltp, dw in bench:
             print(f"▶ {nome}", flush=True)
             to = timed(cur, oltp, a.oltp_runs, a.timeout)
             td = timed(cur, dw, a.runs, a.timeout)
