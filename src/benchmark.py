@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Benchmark OLTP x OLAP: executa consultas equivalentes no nlab_db (normalizado)
-e no nlab_dw (estrela), mede a mediana de N execuções e gera docs/benchmark.md.
+e no nlab_dw (estrela), mede média, mediana e P95 de N execuções e gera relatório Markdown.
 """
 
 import argparse
@@ -11,6 +11,7 @@ import sys
 import time
 
 import pymysql
+
 
 def oltp_ignore_clauses(cur, enabled):
     if not enabled:
@@ -53,21 +54,43 @@ def build_bench(ig):
     ]
 
 
-def timed(cur, sql, runs, timeout):
-    """Mediana em segundos, ou None se estourar o timeout (max_statement_time)."""
+def percentile(sorted_vals, p):
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    pos = (len(sorted_vals) - 1) * (p / 100.0)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (pos - lo) * (sorted_vals[hi] - sorted_vals[lo])
+
+
+def calc_stats(ts):
+    s = sorted(ts)
+    return {
+        "mean": statistics.mean(s),
+        "median": statistics.median(s),
+        "p95": percentile(s, 95),
+    }
+
+
+def timed(cur, label, sql, runs, timeout):
+    """Retorna dict com mean/median/p95 em segundos, ou None se estourar o timeout."""
     ts = []
     cur.execute(f"SET SESSION max_statement_time = {timeout}")
-    for _ in range(runs):
+    for i in range(1, runs + 1):
         t0 = time.time()
         try:
             cur.execute(sql)
             cur.fetchall()
         except pymysql.err.OperationalError as e:
             if e.args[0] == 1969:  # statement timeout
+                print(f"      [{label}] execução {i}/{runs}: > {timeout}s (timeout)", flush=True)
                 return None
             raise
-        ts.append(time.time() - t0)
-    return statistics.median(ts)
+        dt = time.time() - t0
+        ts.append(dt)
+        if i == 1 or i % 5 == 0 or i == runs:
+            print(f"      [{label}] execução {i}/{runs}: {dt:.2f}s", flush=True)
+    return calc_stats(ts)
 
 
 def explain(cur, sql):
@@ -82,9 +105,9 @@ def main():
     ap.add_argument("--port", type=int, default=int(env("NLAB_DB_PORT", "3307")))
     ap.add_argument("--user", default=env("NLAB_DB_USER", "root"))
     ap.add_argument("--password", default=env("NLAB_DB_PASSWORD"))
-    ap.add_argument("--runs", type=int, default=3, help="execuções no DW (mediana)")
-    ap.add_argument("--oltp-runs", type=int, default=1, help="execuções no OLTP (mediana)")
-    ap.add_argument("--timeout", type=int, default=600, help="timeout por consulta (s)")
+    ap.add_argument("--runs", type=int, default=20, help="execuções no DW (padrão: 20)")
+    ap.add_argument("--oltp-runs", type=int, default=20, help="execuções no OLTP (padrão: 20)")
+    ap.add_argument("--timeout", type=int, default=300, help="timeout por consulta (s)")
     ap.add_argument("--no-oltp-indexes", action="store_true",
                     help="ignora índices secundários nas tabelas do OLTP (IGNORE INDEX)")
     ap.add_argument("--out", default="docs/benchmark.md")
@@ -94,24 +117,47 @@ def main():
     conn = pymysql.connect(host=a.host, port=a.port, user=a.user, password=a.password,
                            charset="utf8mb4", read_timeout=7200)
     idx_note = " (índices secundários do OLTP ignorados)" if a.no_oltp_indexes else ""
-    lines = ["# Benchmark OLTP x OLAP", "",
-             f"Mesmo servidor MariaDB{idx_note}. Mediana de {a.runs} execuções no DW e de "
-             f"{a.oltp_runs} no OLTP (timeout de {a.timeout}s por consulta).", "",
-             "| Consulta | OLTP (s) | DW (s) | Speedup |", "|---|---:|---:|---:|"]
+    lines = [
+        "# Benchmark OLTP x OLAP",
+        "",
+        f"Mesmo servidor MariaDB{idx_note}. Estatísticas sobre {a.runs} execuções no DW e "
+        f"{a.oltp_runs} no OLTP (timeout de {a.timeout}s por consulta).",
+        "",
+        "| Consulta | OLTP Média (s) | OLTP Mediana (s) | OLTP P95 (s) | DW Média (s) | DW Mediana (s) | DW P95 (s) | Speedup (Mediana) | Speedup (Média) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
     detail = ["", "## Planos de execução (tabela:tipo/chave/linhas estimadas)", ""]
     with conn.cursor() as cur:
         bench = build_bench(oltp_ignore_clauses(cur, a.no_oltp_indexes))
         for nome, oltp, dw in bench:
             print(f"▶ {nome}", flush=True)
-            to = timed(cur, oltp, a.oltp_runs, a.timeout)
-            td = timed(cur, dw, a.runs, a.timeout)
-            if to is None:
-                print(f"   OLTP > {a.timeout}s (timeout)  DW={td:.2f}s", flush=True)
-                lines.append(f"| {nome} | > {a.timeout} (timeout) | {td:.2f} | > {a.timeout / td:.0f}x |")
+            so = timed(cur, "OLTP", oltp, a.oltp_runs, a.timeout)
+            sd = timed(cur, "DW", dw, a.runs, a.timeout)
+            if so is None:
+                sp_med = f"> {a.timeout / sd['median']:.0f}x"
+                sp_avg = f"> {a.timeout / sd['mean']:.0f}x"
+                print(
+                    f"   RESUMO -> OLTP: > {a.timeout}s (timeout) | "
+                    f"DW: média={sd['mean']:.2f}s mediana={sd['median']:.2f}s p95={sd['p95']:.2f}s",
+                    flush=True,
+                )
+                lines.append(
+                    f"| {nome} | > {a.timeout} | > {a.timeout} | > {a.timeout} | "
+                    f"{sd['mean']:.2f} | {sd['median']:.2f} | {sd['p95']:.2f} | {sp_med} | {sp_avg} |"
+                )
             else:
-                sp = to / td if td > 0 else float("inf")
-                print(f"   OLTP={to:.2f}s  DW={td:.2f}s  speedup={sp:.1f}x", flush=True)
-                lines.append(f"| {nome} | {to:.2f} | {td:.2f} | {sp:.1f}x |")
+                sp_med = f"{so['median'] / sd['median']:.1f}x" if sd["median"] > 0 else "inf"
+                sp_avg = f"{so['mean'] / sd['mean']:.1f}x" if sd["mean"] > 0 else "inf"
+                print(
+                    f"   RESUMO -> OLTP: média={so['mean']:.2f}s mediana={so['median']:.2f}s p95={so['p95']:.2f}s | "
+                    f"DW: média={sd['mean']:.2f}s mediana={sd['median']:.2f}s p95={sd['p95']:.2f}s | "
+                    f"speedup(med)={sp_med}",
+                    flush=True,
+                )
+                lines.append(
+                    f"| {nome} | {so['mean']:.2f} | {so['median']:.2f} | {so['p95']:.2f} | "
+                    f"{sd['mean']:.2f} | {sd['median']:.2f} | {sd['p95']:.2f} | {sp_med} | {sp_avg} |"
+                )
             detail += [f"**{nome}**", f"- OLTP: `{explain(cur, oltp)}`",
                        f"- DW: `{explain(cur, dw)}`", ""]
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
@@ -122,4 +168,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
