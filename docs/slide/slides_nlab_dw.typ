@@ -54,16 +54,16 @@
 #[
   #set text(0.88em)
 
-  O *nLab* é uma wiki colaborativa de Matemática, Física Teórica e Teoria das Categorias. O banco transacional (`nlab_db`) prioriza escrita e versionamento de artigos, tornando agregações históricas custosas.
+  O *nLab* é uma wiki colaborativa de Matemática, Física Teórica e Teoria das Categorias. O banco operacional original foi projetado para edição concorrente de artigos no dia a dia, tornando consultas históricas e relatórios muito custosos.
 
   #v(0.3em)
 
   #grid(
     columns: (1fr, 1fr, 1fr, 1fr),
     gutter: 0.6em,
-    kpi("1.000.000", "Páginas (pages)"),
-    kpi("1.536.920", "Revisões (revisions)"),
-    kpi("5.931.831", "Referências / Links"),
+    kpi("1.000.000", "Páginas"),
+    kpi("1.536.920", "Revisões / Edições"),
+    kpi("5.931.831", "Links e Referências"),
     kpi("3.326 / 54", "Autores / Categorias"),
   )
 
@@ -73,48 +73,48 @@
     columns: (1.05fr, 0.95fr),
     gutter: 1em,
     [
-      *Perguntas analíticas alvo:*
-      - Evolução temporal de edições e criação de verbetes
-      - Concentração de autoria (Pareto) e faixas de atividade
-      - Engajamento e tamanho médio por categoria temática
-      - Rede de referências internas (verbetes *hub*)
+      *Perguntas analíticas que queríamos responder:*
+      - Como o volume de edições cresceu ao longo dos anos?
+      - Quem são os autores que mais produzem na wiki?
+      - Quais categorias temáticas concentram mais artigos?
+      - Quais são os verbetes mais citados e conectados?
     ],
     [
       #quote[
-        *Gargalo no OLTP:* `revisions` armazena o texto completo em `content MEDIUMTEXT` (gigabytes em páginas InnoDB), penalizando varreduras analíticas.
+        *Gargalo do banco operacional:* A tabela de edições guarda o texto completo de cada artigo. Para gerar relatórios simples, o banco precisava carregar gigabytes de texto na memória, tornando as consultas extremamente lentas ou inviáveis.
       ]
     ]
   )
 ]
 
-== Desafios e Anomalias Encontrados no OLTP
+== Desafios e Anomalias Encontrados no Banco Operacional
 
 #[
   #set text(0.82em)
 
-  A inspeção do schema operacional (`nlab_db` no MariaDB 12.3) revelou particularidades estruturais resolvidas pelo ETL:
+  A análise do banco de dados operacional revelou desafios estruturais que foram resolvidos durante a migração para o DW:
 
   #v(0.2em)
 
   #table(
-    columns: (1.05fr, 1.3fr, 1.35fr),
+    columns: (1.1fr, 1.35fr, 1.25fr),
     align: (left, left, left),
-    [ Problema no `nlab_db` ], [ Impacto Analítico ], [ Solução no ETL / DW ],
-    [ Categoria fora de `pages` ], [ Exige `JOIN` com 5,93 M linhas de `wiki_references` (`link_type = 'C'`) ], [ Desnormalização em `dim_pagina.categoria_nome` via staging ],
-    [ `content MEDIUMTEXT` em `revisions` ], [ Estoura o *buffer pool* em *full scans* de agregação ], [ Extrai apenas `CHAR_LENGTH(content)` para `fato_revisao` ],
-    [ Títulos binários (`utf8mb3_bin`) ], [ 631 colisões *case-insensitive* (ex.: `cat` vs. `Cat`) ], [ `dim_pagina.titulo` com collation `utf8mb4_bin` ],
-    [ `target_page_id` parcial ], [ Links `R` e parte dos `L`/`I` trazem só `referenced_name` ], [ `COALESCE` entre `target_page_id` e busca exata por título ],
+    [ Desafio no Banco Original ], [ Problema Gerado ], [ Como Resolvemos no DW ],
+    [ Categorias fora da tabela de páginas ], [ Exigia cruzar milhões de links para descobrir a categoria de um artigo ], [ Gravamos a categoria diretamente na dimensão de páginas ],
+    [ Texto completo salvo nas edições ], [ Carregava gigabytes de texto na memória para contas simples ], [ Guardamos apenas o tamanho do texto (caracteres) e a variação ],
+    [ Títulos que diferem só por maiúscula/minúscula ], [ O banco original misturava termos matemáticos distintos (ex.: `cat` vs. `Cat`) ], [ Configuramos distinção exata entre maiúsculas e minúsculas ],
+    [ Links sem o código da página de destino ], [ Links da wiki ficavam sem chave de destino associada ], [ O ETL busca e associa a página certa pelo título exato ],
   )
 ]
 
 = Modelagem Dimensional (Kimball)
 
-== Arquitetura: Constelação de Fatos
+== Arquitetura: Constelação de Fatos (Star Schema)
 
 #[
   #set text(0.84em)
 
-  Adotou-se uma *Constelação de Fatos* (*Fact Constellation*) em *Star Schema*: duas tabelas fato compartilham a dimensão conformada `dim_pagina`, evitando *Snowflake* desnecessário para 54 categorias.
+  Adotou-se uma *Constelação de Fatos* (*Fact Constellation*) em *Star Schema*: duas tabelas fato compartilham a dimensão conformada de páginas.
 
   #v(0.3em)
 
@@ -125,27 +125,27 @@
     stack(
       spacing: 0.5em,
       box-schema("dim_tempo", "10.170 dias (2008–2035)"),
-      box-schema("dim_hora", "24 horas / 4 turnos"),
-      box-schema("dim_autor", "3.327 autores (SCD Tipo 1)"),
+      box-schema("dim_hora", "24 horas do dia / 4 turnos"),
+      box-schema("dim_autor", "3.327 autores cadastrados"),
     ),
     stack(
       spacing: 0.5em,
-      box-schema("FATO_REVISAO", "1.536.920 linhas • Grão: 1 edição\nMedidas: qtd, tamanho, delta, intervalo", cor-fundo: navy.lighten(78%), cor-borda: navy),
+      box-schema("FATO_REVISAO", "1.536.920 linhas • Grão: 1 edição\nMedidas: qtd, tamanho, delta de texto", cor-fundo: navy.lighten(78%), cor-borda: navy),
       box-schema("dim_pagina (Conformada)", "1.000.000 páginas • categoria desnormalizada", cor-fundo: rgb("#eef6ee"), cor-borda: green-ok),
       box-schema("FATO_REFERENCIA", "5.931.831 linhas • Grão: 1 referência\nFK dupla: origem e destino em dim_pagina", cor-fundo: navy.lighten(78%), cor-borda: navy),
     ),
     stack(
       spacing: 0.5em,
-      box-schema("dim_tipo_link", "6 tipos: L, C, R, I, W, F"),
+      box-schema("dim_tipo_link", "6 tipos: link, categoria, imagem, etc."),
       block(
         width: 100%,
         fill: soft-blue,
         radius: 4pt,
         inset: 7pt,
       )[
-        #text(0.8em)[
-          *Por que Estrela?* \
-          Desnormalizar `categoria_nome` em `dim_pagina` elimina 2 `JOIN`s em toda consulta temática sem custo relevante de espaço.
+        #text(0.78em)[
+          *Por que Star e NÃO Snowflake?* \
+          No Snowflake, as 54 categorias ficariam em uma tabela separada, forçando mais um `JOIN` a cada consulta. No Star Schema, a categoria fica na própria página, dando velocidade máxima sem desperdício de espaço.
         ]
       ]
     ),
@@ -162,25 +162,25 @@
     gutter: 1em,
     [
       *1. `fato_revisao` (1.536.920 linhas)*
-      - *Grão:* 1 revisão de uma página por um autor em dada data/hora.
-      - *Aditivas:* `qtd_revisoes` (unitária), `eh_primeira_revisao` (criação), `delta_tamanho` (variação de caracteres).
-      - *Semi-aditiva:* `tamanho_conteudo` (usar `AVG`/`MAX`, não somar no tempo).
-      - *Não aditivas:* `numero_revisao` e `dias_desde_rev_anterior`.
-      - *Degenerada:* `id_revisao_oltp` (rastreabilidade 1:1).
+      - *Grão:* 1 edição de uma página por um autor em dada data/hora.
+      - *Aditivas (podem ser somadas):* quantidade de revisões, se é a criação da página e variação de caracteres.
+      - *Semi-aditiva:* tamanho total do texto (usar média ou valor máximo; não somar no tempo).
+      - *Não aditiva:* número da versão da edição.
+      - *Rastreabilidade:* código original da revisão no banco antigo.
     ],
     [
       *2. `fato_referencia` (5.931.831 linhas)*
-      - *Grão:* 1 link/referência partindo de uma página.
-      - *Role-playing FK:* `sk_pagina_origem` e `sk_pagina_destino` apontam para `dim_pagina`.
-      - *Aditivas:* `qtd_links` e `eh_destino_resolvido`.
-      - *Degenerada:* `id_referencia_oltp`.
+      - *Grão:* 1 link de citação partindo de uma página.
+      - *Chave dupla:* página de origem e página de destino apontam para a dimensão de páginas.
+      - *Aditivas:* quantidade de links e se o destino foi resolvido.
+      - *Rastreabilidade:* código original do link no banco antigo.
     ]
   )
 
   #v(0.25em)
 
   #quote[
-    Separar revisões e referências em duas fatos preserva o grão exato de cada processo de negócio e evita explosão cartesiana (`1,54 M × 5,93 M`).
+    Separar revisões e links em duas tabelas fatos preserva o objetivo de cada processo e evita multiplicar milhões de linhas sem necessidade.
   ]
 ]
 
@@ -191,7 +191,7 @@
 #[
   #set text(0.79em)
 
-  Pipeline idempotente em Python + SQL *pushdown* no MariaDB, concluído em *862,6 s* (\~14,4 min) para \~8,5 milhões de registros totais:
+  Pipeline automatizado em Python executando as operações pesadas direto no banco de dados (carga total em \~14 minutos para 8,5 milhões de registros):
 
   #v(0.2em)
 
@@ -199,16 +199,16 @@
     columns: (1fr, 1fr, 1fr),
     gutter: 0.6em,
     [
-      / 1. DDL Limpo (`0,2 s`): Recria tabelas sem índices secundários nem FKs (`01_schema_dw.sql`).
-      / 2. Staging (`107,5 s`): Extrai `stg_revisao` em lotes de 500k (sem texto) e `stg_categoria_pagina` (986.748 links `C`).
+      / 1. Preparação (`0,2 s`): Recria as tabelas limpas sem índices secundários para acelerar a carga.
+      / 2. Staging / Rascunho (`107,5 s`): Limpa as categorias e calcula o tamanho do texto em lotes.
     ],
     [
-      / 3. Dimensões (`28,8 s`): Calendário contínuo (`dim_tempo`), `dim_hora`, `dim_autor` (`idx_autor_oltp`), `dim_pagina` e `dim_tipo_link`.
-      / 4. Fatos (`120,2 s`): Window functions (`ROW_NUMBER`, `LAG`) em `fato_revisao` + 12 lotes em `fato_referencia`.
+      / 3. Dimensões (`28,8 s`): Popula autores, páginas e o calendário contínuo de datas (2008 a 2035).
+      / 4. Fatos (`120,2 s`): Carrega as 1,5M revisões e quase 6M links com versões e deltas calculados.
     ],
     [
-      / 5. Pós-carga (`555,9 s`): Criação em lote de índices secundários e 7 FKs (`01b_post_load.sql`) + recálculo SCD1 de `dim_autor`.
-      / 6. Reconciliação: `validate_load()` audita contagens, somas, órfãos e calendário; aborta (`exit 1`) se divergir.
+      / 5. Pós-carga (`555,9 s`): *Otimização essencial:* cria todos os índices secundários só no final, poupando horas.
+      / 6. Validação: Checa contagens, somas e integridade; interrompe se houver divergência.
     ]
   )
 ]
@@ -282,9 +282,9 @@
   - *Padrão temporal (Q4, Q8, Q10):* distribuição semanal uniforme (\~14,3%/dia), pico em `2022-07` (10.419 edições) e maior volume na *Madrugada* (`35,08%`, média de `5.549` caracteres vs. `801` nos demais turnos).
 ]
 
-= Benchmark: OLTP vs. OLAP
+= Benchmark: Banco Original vs. Data Warehouse
 
-== Metodologia Experimental (`src/benchmark.py`)
+== Metodologia Experimental do Teste
 
 #[
   #set text(0.82em)
@@ -294,18 +294,18 @@
     gutter: 1em,
     [
       *Protocolo de medição:*
-      - *Mesmo servidor:* MariaDB `12.3.3` (`nlab_mariadb`)
-      - *Amostragem:* *20 execuções consecutivas* no OLTP e *20 no DW* por consulta (sem concorrência)
-      - *Timeout:* `300 s` por consulta (`max_statement_time`)
+      - *Mesmo ambiente:* Testes rodando no mesmo servidor para garantir igualdade
+      - *Amostragem:* *20 execuções consecutivas* em cada banco por consulta (para validar estabilidade)
+      - *Tempo limite:* `300 s` (5 minutos) por consulta
       - *Dois cenários avaliados:*
-        1. *Cenário A:* OLTP sem índices secundários (`IGNORE INDEX`)
-        2. *Cenário B:* OLTP com todos os índices secundários nativos
+        1. *Cenário A:* Banco original sem índices secundários
+        2. *Cenário B:* Banco original com todos os índices secundários ativos
     ],
     [
       *Por que Média, Mediana e P95?*
-      / Média: Captura o impacto combinado de aquecimento e regime estável.
-      / Mediana (P50): Representa o desempenho típico com *cache* aquecido.
-      / P95 (Percentil 95): Mede a *latência de cauda* e a previsibilidade sob pressão de I/O.
+      / Média: O tempo médio de todas as 20 rodadas.
+      / Mediana (P50): O tempo típico do sistema no dia a dia.
+      / P95: O pico de lentidão (mostra a estabilidade sob pressão de memória).
     ]
   )
 
@@ -313,19 +313,19 @@
   - *Consultas comparadas:* *B1* — Revisões por ano/mês | *B2* — Revisões por categoria temática | *B3* — Revisões por autor.
 ]
 
-== Cenário A: OLTP sem Índices Secundários (20x)
+== Cenário A: Banco Original sem Índices Secundários (20x)
 
 #[
   #set text(0.79em)
 
-  Com apenas chaves `PRIMARY` no OLTP, o SGBD precisa varrer `revisions` (com `MEDIUMTEXT`) e cruzar `wiki_references` via *Block Nested Loop*:
+  Sem índices secundários no banco original, consultas que cruzam tabelas grandes sofrem lentidão extrema:
 
   #v(0.2em)
 
   #table(
     columns: (1.4fr, 0.7fr, 0.7fr, 0.7fr, 0.65fr, 0.65fr, 0.65fr, 0.75fr, 0.75fr),
     align: (left, right, right, right, right, right, right, right, right),
-    [ Consulta ], [ OLTP Méd. ], [ OLTP Med. ], [ OLTP P95 ], [ DW Méd. ], [ DW Med. ], [ DW P95 ], [ Ganho Med. ], [ Ganho P95 ],
+    [ Consulta ], [ Original Méd. ], [ Original Med. ], [ Original P95 ], [ DW Méd. ], [ DW Med. ], [ DW P95 ], [ Ganho Med. ], [ Ganho P95 ],
     [ *B1 — Ano/Mês* ], [ 9,05 s ], [ 4,64 s ], [ 25,07 s ], [ 3,26 s ], [ 2,76 s ], [ 3,31 s ], [ *1,7x* ], [ *7,6x* ],
     [ *B2 — Categoria* ], [ > 300 s ], [ > 300 s ], [ > 300 s ], [ 4,49 s ], [ 4,17 s ], [ 4,69 s ], [ *> 72x* ], [ *> 64x* ],
     [ *B3 — Autor* ], [ 11,37 s ], [ 7,89 s ], [ 25,15 s ], [ 2,79 s ], [ 2,65 s ], [ 2,95 s ], [ *3,0x* ], [ *8,5x* ],
@@ -333,23 +333,23 @@
 
   #v(0.2em)
 
-  - *Previsibilidade (P95):* em B1 e B3, o OLTP sofre picos de *37–40 s* nas primeiras execuções (`P95 ~ 25,1 s`) por estourar o *buffer pool*, enquanto `fato_revisao` mantém `P95` entre *2,95 s e 3,31 s* (*7,6x a 8,5x mais rápido*).
-  - *Eliminação de `JOIN` (B2):* o cruzamento `w:ALL × r:ALL` excede 300 s no OLTP; no DW conclui em *4,17 s* (*> 72x*).
+  - *Eliminação de junções custosas (B2):* cruzar 3 tabelas estoura o limite de 5 minutos (> 300 s) no banco original; no DW responde em *4,17 s* (*mais de 72x mais rápido*).
+  - *Estabilidade previsível (P95):* nas outras consultas, o banco original teve picos de até 40 s; no DW a resposta é sempre estável abaixo de *3,3 s* (*7,6x a 8,5x mais rápido*).
 ]
 
-== Cenário B: OLTP com Índices Secundários Nativos (20x)
+== Cenário B: Banco Original com Índices Secundários (20x)
 
 #[
   #set text(0.79em)
 
-  Com índices secundários ativos em `revisions(created_at)`, `revisions(page_id)` e `revisions(author_id)`:
+  Com índices secundários ativos no banco original:
 
   #v(0.2em)
 
   #table(
     columns: (1.4fr, 0.7fr, 0.7fr, 0.7fr, 0.65fr, 0.65fr, 0.65fr, 0.75fr, 0.75fr),
     align: (left, right, right, right, right, right, right, right, right),
-    [ Consulta ], [ OLTP Méd. ], [ OLTP Med. ], [ OLTP P95 ], [ DW Méd. ], [ DW Med. ], [ DW P95 ], [ Ganho Méd. ], [ Ganho Med. ],
+    [ Consulta ], [ Original Méd. ], [ Original Med. ], [ Original P95 ], [ DW Méd. ], [ DW Med. ], [ DW P95 ], [ Ganho Méd. ], [ Ganho Med. ],
     [ *B1 — Ano/Mês* ], [ 0,70 s ], [ 0,43 s ], [ 0,73 s ], [ 2,98 s ], [ 2,61 s ], [ 3,22 s ], [ 0,2x ], [ 0,2x ],
     [ *B2 — Categoria* ], [ 5,04 s ], [ 3,92 s ], [ 5,33 s ], [ 4,02 s ], [ 3,78 s ], [ 4,12 s ], [ *1,3x* ], [ *1,0x* ],
     [ *B3 — Autor* ], [ 0,44 s ], [ 0,29 s ], [ 0,45 s ], [ 2,54 s ], [ 2,53 s ], [ 2,60 s ], [ 0,2x ], [ 0,1x ],
@@ -357,8 +357,8 @@
 
   #v(0.2em)
 
-  - *Leitura crítica de B1 e B3:* como o SQL OLTP faz apenas `COUNT(*)` sobre uma coluna indexada, o InnoDB executa *index-only scan* (`Using index`, `0,29–0,43 s`) sem tocar nas linhas de `revisions`. No DW, `SUM(f.qtd_revisoes)` lê os registros da tabela fato (`~2,5 s`).
-  - *Vantagem do DW em B2 mesmo contra OLTP indexado:* na 1ª execução a frio, o OLTP levou *25,72 s* varrendo 5,93 M linhas de `wiki_references` (contra *8,73 s* no DW), mantendo o DW *1,3x melhor na média e no P95*.
+  - *Entendendo B1 e B3:* em contagens simples de uma coluna, o banco original é rápido porque conta direto no índice (`COUNT(*)`). No DW, estamos somando métricas de negócio em cima da tabela inteira em tempo constante (\~2,5 s).
+  - *Vantagem do DW na análise temática (B2):* na primeira execução, o banco original levou *25,72 s* cruzando dados de links, contra *8,73 s* no DW, mantendo o DW *1,3x melhor na média e no P95*.
 ]
 
 == Síntese Comparativa e Conclusões
@@ -370,16 +370,16 @@
     columns: (1.08fr, 0.92fr),
     gutter: 1em,
     [
-      *Quando o modelo dimensional (OLAP) se destaca:*
-      1. *Consultas multi-tabela e atributos desnormalizados (B2):* reduz uma junção de 3 tabelas (> 300 s s/ índice; 25,7 s a frio c/ índice) para `~3,8–4,2 s` constantes.
-      2. *Estabilidade de latência (P95):* separar o texto bruto (`MEDIUMTEXT`) das medidas numéricas mantém a tabela fato no *buffer pool* (`P95 < 4,7 s` em todos os testes).
-      3. *Múltiplas medidas simultâneas:* diferente do *index-only scan* de `COUNT(*)`, o DW agrega `tamanho_conteudo`, `delta_tamanho` e `eh_primeira_revisao` no mesmo passe de `~2,5 s`.
+      *Quando o Data Warehouse se destaca de verdade:*
+      1. *Consultas com junções entre tabelas (B2):* Reduz uma consulta que demorava mais de 5 minutos (ou 25 s no banco com índice) para `~4 segundos` constantes.
+      2. *Estabilidade de tempo de resposta:* Descartar o texto bruto mantém as tabelas fatos leves na memória, eliminando picos de travamento.
+      3. *Cálculo de várias métricas juntas:* Permite calcular tamanho, variações e contagens no mesmo passe de `~2,5 s`.
     ],
     [
       *Resumo do Projeto:*
-      / Modelagem: Constelação de fatos (`fato_revisao` + `fato_referencia`) e 5 dimensões conformadas.
-      / Carga Verificada: `7.468.751` fatos carregados com *100% de reconciliação* e *0 rejeições*.
-      / Ganhos Medidos (20x): Até *> 72x na mediana* (B2) e *7,6x–8,5x no P95* (B1/B3) frente ao OLTP sem índices secundários.
+      / Modelagem: Constelação de fatos (`fato_revisao` + `fato_referencia`) com dimensão de páginas compartilhada.
+      / Carga Verificada: Quase `7,5 milhões` de fatos carregados com *100% de reconciliação* e *0 rejeições*.
+      / Ganhos Medidos: Até *> 72x mais rápido* na consulta temática e *7x a 8x mais estável* nos picos de lentidão.
     ]
   )
 ]
