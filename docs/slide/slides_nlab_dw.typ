@@ -262,40 +262,56 @@
 
 = Desempenho e Conclusões
 
-== Benchmark Experimental (OLTP vs. DW) e Síntese
+== Benchmark Experimental (`src/benchmark.py`): Consultas e Tempos
 
 #[
-  #set text(0.71em)
-  #set table(inset: (x: 5pt, y: 3.8pt))
+  #set text(0.68em)
+  #set table(inset: (x: 5pt, y: 3.4pt))
 
-  Comparativo no mesmo servidor MariaDB (*20 execuções consecutivas por consulta*, timeout de `300 s`), avaliando o OLTP sem e com índices secundários:
+  Comparativo no mesmo servidor MariaDB (*20 execuções consecutivas por consulta*, timeout de `300 s`), avaliando equivalentes SQL no OLTP (`nlab_db`, sem índices via `IGNORE INDEX` e com índices secundários) e no DW (`nlab_dw`):
 
-  #v(0.1em)
+  #v(0.08em)
 
   #table(
-    columns: (1.15fr, 0.65fr, 0.65fr, 0.6fr, 0.6fr, 0.88fr, 0.65fr, 0.6fr, 0.68fr),
-    align: (left, right, right, right, right, right, right, right, right),
-    [ Consulta ], [ OLTP s/ Índ. Med. ], [ OLTP s/ Índ. P95 ], [ DW Med. ], [ DW P95 ], [ Speedup s/ Índ. (Med. / P95) ], [ OLTP c/ Índ. Méd. ], [ DW Méd. ], [ Speedup c/ Índ. ],
-    [ *B1 — Ano/Mês* ], [ 4,64 s ], [ 25,07 s ], [ 2,76 s ], [ 3,31 s ], [ *1,7x / 7,6x* ], [ 0,70 s ], [ 2,98 s ], [ 0,2x ],
-    [ *B2 — Categoria* ], [ > 300 s ], [ > 300 s ], [ 4,17 s ], [ 4,69 s ], [ *> 72x / > 64x* ], [ 5,04 s ], [ 4,02 s ], [ *1,3x* ],
-    [ *B3 — Autor* ], [ 7,89 s ], [ 25,15 s ], [ 2,65 s ], [ 2,95 s ], [ *3,0x / 8,5x* ], [ 0,44 s ], [ 2,54 s ], [ 0,2x ],
+    columns: (0.28fr, 0.95fr, 1.45fr, 1.42fr),
+    align: (center, left, left, left),
+    [ ID ], [ Objetivo da Consulta ], [ Consulta no OLTP (`nlab_db`) ], [ Consulta Equivalente no DW (`nlab_dw`) ],
+    [ *B1* ], [ Total de revisões por ano e mês ], [ `COUNT(*)` em `revisions` (`1,54M` linhas) calculando `YEAR(created_at)` e `MONTH(created_at)` ], [ `SUM(qtd_revisoes)` em `fato_revisao` + `JOIN dim_tempo` agrupando por `t.ano, t.mes` ],
+    [ *B2* ], [ Total de revisões por categoria temática ], [ `COUNT(*)` com `JOIN` triplo: `revisions` × `wiki_references` (`link_type = 'C'`, `5,93M`) × `categories` ], [ `SUM(qtd_revisoes)` em `fato_revisao` + `JOIN` único em `dim_pagina` por `p.categoria_nome` ],
+    [ *B3* ], [ Total de revisões por autor ], [ `COUNT(*)` em `revisions` + `JOIN users` (`u.id = r.author_id`) agrupando por `u.name` ], [ `SUM(qtd_revisoes)` em `fato_revisao` + `JOIN dim_autor` (`sk_autor`) agrupando por `a.nome_autor` ],
   )
 
   #v(0.12em)
 
+  #table(
+    columns: (1.46fr, 0.62fr, 0.62fr, 0.56fr, 0.56fr, 0.85fr, 0.62fr, 0.56fr, 0.64fr),
+    align: (left, right, right, right, right, right, right, right, right),
+    [ Consulta ], [ OLTP s/ Índ. Med. ], [ OLTP s/ Índ. P95 ], [ DW Med. ], [ DW P95 ], [ Speedup s/ Índ. (Med. / P95) ], [ OLTP c/ Índ. Méd. ], [ DW Méd. ], [ Speedup c/ Índ. ],
+    [ *B1 — Revisões por Ano/Mês* ], [ 4,64 s ], [ 25,07 s ], [ 2,76 s ], [ 3,31 s ], [ *1,7x / 7,6x* ], [ 0,70 s ], [ 2,98 s ], [ 0,2x ],
+    [ *B2 — Revisões por Categoria* ], [ > 300 s ], [ > 300 s ], [ 4,17 s ], [ 4,69 s ], [ *> 72x / > 64x* ], [ 5,04 s ], [ 4,02 s ], [ *1,3x* ],
+    [ *B3 — Revisões por Autor* ], [ 7,89 s ], [ 25,15 s ], [ 2,65 s ], [ 2,95 s ], [ *3,0x / 8,5x* ], [ 0,44 s ], [ 2,54 s ], [ 0,2x ],
+  )
+]
+
+== Análise de Desempenho e Conclusões do Projeto
+
+#[
+  #set text(0.79em)
+
   #grid(
-    columns: (1.12fr, 0.88fr),
-    gutter: 0.85em,
+    columns: (1.14fr, 0.86fr),
+    gutter: 0.95em,
     [
-      *Análise dos Resultados:*
-      - *Junções multi-tabela (B2):* sem índices secundários, o `JOIN` triplo no OLTP excede `300 s`; no DW responde em `4,17 s` (*> 72x mais rápido*). Com índices, a 1ª execução a frio leva `25,72 s` no OLTP contra `8,73 s` no DW (*1,3x melhor na média e no P95*).
-      - *Estabilidade de P95 (B1 e B3):* sem texto bruto nas tabelas fato, o DW evita estouro de _buffer pool_ (`P95 < 3,3 s` vs. `25,1 s` no OLTP). Com índices, o OLTP faz _index-only scan_ em `COUNT(*)`, enquanto o DW agrega medidas explícitas em tempo constante (\~2,6 s).
+      *Análise dos Resultados do Benchmark:*
+      - *Junções multi-tabela (`B2` — Categoria):* sem índices secundários, o `JOIN` triplo passando por `wiki_references` (`5,93M` linhas) excede `300 s` no OLTP; no DW responde em `4,17 s` (*> 72x mais rápido*). Com índices, a 1ª execução a frio custa `25,72 s` no OLTP contra `8,73 s` no DW (*1,3x melhor na média e no P95*).
+      - *Estabilidade de P95 (`B1` e `B3` sem índices):* sem o texto bruto (`content`) na fato, o DW evita estouro de _buffer pool_ (`P95 < 3,3 s` vs. `~25,1 s` no OLTP — *7,6x a 8,5x mais rápido*).
+      - *`COUNT(*)` em índice vs. medidas explícitas (`B1` e `B3` c/ índices):* o OLTP varre apenas a árvore do índice secundário (_index-only scan_), enquanto o DW soma `SUM(qtd_revisoes)` na tabela fato em tempo constante (`~2,6 s`), mantendo o mesmo custo ao agregar múltiplas medidas.
     ],
     [
       *Conclusões do Projeto:*
-      - *Modelagem:* Constelação de fatos (`fato_revisao` + `fato_referencia`) com `dim_pagina` conformada em Star Schema.
-      - *Qualidade:* \~7,5M de fatos carregados com *100% de reconciliação* nos 7 testes e *0 rejeições*.
-      - *Capacidade Analítica:* Suporte direto a análises multidimensionais (`ROLLUP`, janelas móveis, Pareto e grafos).
+      - *Modelagem Dimensional:* Constelação de fatos (`fato_revisao` + `fato_referencia`) com `dim_pagina` conformada em Star Schema, eliminando junções caras por categoria e tempo.
+      - *Qualidade e Confiabilidade:* \~7,5M de fatos carregados em \~14 min com *100% de reconciliação* nos 7 testes automatizados e *0 rejeições*.
+      - *Capacidade Analítica:* Suporte direto a análises multidimensionais complexas (`WITH ROLLUP`, médias móveis, MoM/YoY, Pareto e centralidade de links).
     ]
   )
 ]
