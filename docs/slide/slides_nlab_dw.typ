@@ -186,7 +186,7 @@
 
 = Pipeline de ETL e Qualidade de Dados
 
-== Fluxo de Carga e Otimizações (`src/etl.py`)
+== Fluxo de Carga e Otimizações
 
 #[
   #set text(0.79em)
@@ -218,14 +218,14 @@
 #[
   #set text(0.8em)
 
-  Todos os 7 testes automáticos de integridade passaram com *0 registros em `etl_rejeitados`*:
+  Todos os 7 testes automáticos de integridade passaram:
 
   #v(0.15em)
 
   #table(
     columns: (1.75fr, 0.8fr, 0.8fr, 0.45fr),
     align: (left, right, right, center),
-    [ Regra de Reconciliação (`validate_load`) ], [ Esperado (OLTP) ], [ Obtido (DW) ], [ Status ],
+    [ Regra de Reconciliação ], [ Esperado (OLTP) ], [ Obtido (DW) ], [ Status ],
     [ `revisions = fato_revisao + rejeitadas` ], [ 1.536.920 ], [ 1.536.920 ], [ *OK* ],
     [ `pages = dim_pagina` ], [ 1.000.000 ], [ 1.000.000 ], [ *OK* ],
     [ `wiki_references = fato_referencia + rejeitadas` ], [ 5.931.831 ], [ 5.931.831 ], [ *OK* ],
@@ -243,7 +243,7 @@
 #[
   #set text(0.77em)
 
-  Foram executadas *10 consultas OLAP* (`sql/02_queries_olap.sql`) explorando `WITH ROLLUP`, `DENSE_RANK`, `LAG`/`LEAD`, médias móveis, `NTILE(4)` e a constelação de fatos:
+  Foram executadas *10 consultas OLAP* explorando `WITH ROLLUP`, `DENSE_RANK`, `LAG`/`LEAD`, médias móveis, `NTILE(4)` e a constelação de fatos:
 
   #v(0.15em)
 
