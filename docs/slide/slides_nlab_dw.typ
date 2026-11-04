@@ -2,8 +2,8 @@
 
 #show: slides.with(
   title: "Data Warehouse Para O Banco do NLab",
-  subtitle: "Modelagem e comparativo com banco relacional OLTP",
-  date: "05.10.2026",
+  subtitle: "Modelagem dimensional, pipeline de ETL e análise comparativa com OLTP",
+  date: "Novembro de 2026",
   authors: ("Jéssica Pereira, Lucas Ramos",),
 
   ratio: 16/9,
@@ -27,7 +27,7 @@
   inset: (x: 8pt, y: 7pt),
 )[
   #align(center)[
-    #text(1.3em, weight: "bold", fill: navy)[#valor] \
+    #text(1.25em, weight: "bold", fill: navy)[#valor] \
     #v(-3pt)
     #text(0.78em)[#rotulo]
   ]
@@ -41,9 +41,23 @@
   inset: (x: 7pt, y: 6pt),
 )[
   #align(center)[
-    #text(0.88em, weight: "bold", fill: navy)[#titulo] \
+    #text(0.86em, weight: "bold", fill: navy)[#titulo] \
     #v(-3pt)
-    #text(0.74em)[#subtitulo]
+    #text(0.72em)[#subtitulo]
+  ]
+]
+
+#let box-entity(nome, campos, cor-fundo: soft-blue, cor-borda: mid-blue) = block(
+  width: 100%,
+  fill: cor-fundo,
+  stroke: 1pt + cor-borda,
+  radius: 4pt,
+  inset: (x: 6pt, y: 5pt),
+)[
+  #align(left)[
+    #text(0.82em, weight: "bold", fill: navy)[#nome] \
+    #v(-4pt)
+    #text(0.68em)[#campos]
   ]
 ]
 
@@ -52,17 +66,17 @@
 == O Dataset do nLab e o Problema Analítico
 
 #[
-  #set text(0.88em)
+  #set text(0.86em)
 
-  O *nLab* é uma wiki colaborativa de Matemática, Física Teórica e Teoria das Categorias. O banco operacional original foi projetado para edição concorrente de artigos no dia a dia, tornando consultas históricas e relatórios muito custosos.
+  O *nLab* é uma enciclopédia colaborativa aberta de Matemática, Física Teórica e Teoria das Categorias. O banco operacional original foi projetado para edição concorrente de artigos no dia a dia, tornando consultas históricas e relatórios muito custosos.
 
   #v(0.3em)
 
   #grid(
     columns: (1fr, 1fr, 1fr, 1fr),
     gutter: 0.6em,
-    kpi("1.000.000", "Páginas"),
-    kpi("1.536.920", "Revisões / Edições"),
+    kpi("1.000.000", "Páginas (pages)"),
+    kpi("1.536.920", "Revisões (revisions)"),
     kpi("5.931.831", "Links e Referências"),
     kpi("3.326 / 54", "Autores / Categorias"),
   )
@@ -73,7 +87,7 @@
     columns: (1.05fr, 0.95fr),
     gutter: 1em,
     [
-      *Perguntas analíticas que queríamos responder:*
+      *Questões analíticas a serem respondidas:*
       - Como o volume de edições cresceu ao longo dos anos?
       - Quem são os autores que mais produzem na wiki?
       - Quais categorias temáticas concentram mais artigos?
@@ -81,29 +95,50 @@
     ],
     [
       #quote[
-        *Gargalo do banco operacional:* A tabela de edições guarda o texto completo de cada artigo. Para gerar relatórios simples, o banco precisava carregar gigabytes de texto na memória, tornando as consultas extremamente lentas ou inviáveis.
+        *Gargalo de análises no banco operacional:* O modelo transacional é eficiente para edições pontuais de artigos. Contudo, ao executar consultas analíticas que varrem o histórico, o banco é obrigado a carregar gigabytes de texto na memória, tornando relatórios gerenciais inviáveis sem comprometer o sistema operacional.
       ]
     ]
   )
 ]
 
-== Desafios e Anomalias Encontrados no Banco Operacional
+== Modelagem Relacional de Origem (OLTP em 3NF)
 
 #[
-  #set text(0.82em)
+  #set text(0.80em)
 
-  A análise do banco de dados operacional revelou desafios estruturais que foram resolvidos durante a migração para o DW:
+  O banco operacional original é normalizado em *3ª Forma Normal*, estruturado em torno das seguintes entidades e relacionamentos transacionais:
 
-  #v(0.2em)
+  #v(0.25em)
 
-  #table(
-    columns: (1.1fr, 1.35fr, 1.25fr),
-    align: (left, left, left),
-    [ Desafio no Banco Original ], [ Problema Gerado ], [ Como Resolvemos no DW ],
-    [ Categorias fora da tabela de páginas ], [ Exigia cruzar milhões de links para descobrir a categoria de um artigo ], [ Gravamos a categoria diretamente na dimensão de páginas ],
-    [ Texto completo salvo nas edições ], [ Carregava gigabytes de texto na memória para contas simples ], [ Guardamos apenas o tamanho do texto (caracteres) e a variação ],
-    [ Títulos que diferem só por maiúscula/minúscula ], [ O banco original misturava termos matemáticos distintos (ex.: `cat` vs. `Cat`) ], [ Configuramos distinção exata entre maiúsculas e minúsculas ],
-    [ Links sem o código da página de destino ], [ Links da wiki ficavam sem chave de destino associada ], [ O ETL busca e associa a página certa pelo título exato ],
+  #grid(
+    columns: (1fr, 1.25fr, 1fr),
+    gutter: 0.7em,
+    align: horizon,
+    stack(
+      spacing: 0.5em,
+      box-entity("categories (54)", "• id (PK)\n• name"),
+      box-entity("users (3.326)", "• id (PK)\n• name\n• total_revisions"),
+    ),
+    stack(
+      spacing: 0.5em,
+      box-entity("pages (1.000.000)", "• id (PK)\n• name, slug\n• category_id (FK)\n• author_id (FK)", cor-fundo: rgb("#fef8ea"), cor-borda: rgb("#d4a017")),
+      box-entity("revisions (1.536.920)", "• id (PK)\n• page_id (FK)\n• author_id (FK)\n• content (MEDIUMTEXT)\n• created_at", cor-fundo: rgb("#fef8ea"), cor-borda: rgb("#d4a017")),
+    ),
+    stack(
+      spacing: 0.5em,
+      box-entity("wiki_references (5.931.831)", "• id (PK)\n• page_id (FK)\n• link_type (L, C, R, I, W, F)\n• referenced_name\n• target_page_id (FK)"),
+      block(
+        width: 100%,
+        fill: soft-blue,
+        radius: 4pt,
+        inset: 6pt,
+      )[
+        #text(0.72em)[
+          *Gargalo de Junções:* \
+          Descobrir a categoria de uma página exigia cruzar `revisions` (1,5M) com `wiki_references` (5,9M linhas) com `link_type = 'C'`, degradando o tempo de resposta.
+        ]
+      ]
+    ),
   )
 ]
 
@@ -112,11 +147,11 @@
 == Arquitetura: Constelação de Fatos (Star Schema)
 
 #[
-  #set text(0.84em)
+  #set text(0.83em)
 
   Adotou-se uma *Constelação de Fatos* (*Fact Constellation*) em *Star Schema*: duas tabelas fato compartilham a dimensão conformada de páginas.
 
-  #v(0.3em)
+  #v(0.25em)
 
   #grid(
     columns: (1fr, 1.25fr, 1fr),
@@ -143,7 +178,7 @@
         radius: 4pt,
         inset: 7pt,
       )[
-        #text(0.78em)[
+        #text(0.76em)[
           *Por que Star e NÃO Snowflake?* \
           No Snowflake, as 54 categorias ficariam em uma tabela separada, forçando mais um `JOIN` a cada consulta. No Star Schema, a categoria fica na própria página, dando velocidade máxima sem desperdício de espaço.
         ]
@@ -155,7 +190,7 @@
 == Tabelas Fato, Grão e Aditividade
 
 #[
-  #set text(0.83em)
+  #set text(0.82em)
 
   #grid(
     columns: (1.15fr, 0.85fr),
@@ -163,9 +198,9 @@
     [
       *1. `fato_revisao` (1.536.920 linhas)*
       - *Grão:* 1 edição de uma página por um autor em dada data/hora.
-      - *Aditivas (podem ser somadas):* quantidade de revisões, se é a criação da página e variação de caracteres.
-      - *Semi-aditiva:* tamanho total do texto (usar média ou valor máximo; não somar no tempo).
-      - *Não aditiva:* número da versão da edição.
+      - *Aditivas (podem ser somadas):* quantidade de revisões, se é a criação da página e variação de caracteres (`delta_tamanho`).
+      - *Semi-aditiva:* tamanho total do texto (`tamanho_conteudo` — usar média ou valor máximo; não somar no tempo).
+      - *Não aditiva:* número da versão da edição (`numero_revisao`).
       - *Rastreabilidade:* código original da revisão no banco antigo.
     ],
     [
@@ -186,7 +221,7 @@
 
 = Pipeline de ETL e Qualidade de Dados
 
-== Fluxo de Carga e Otimizações
+== Fluxo de Carga e Otimizações (`src/etl.py`)
 
 #[
   #set text(0.79em)
@@ -211,41 +246,40 @@
       / 6. Validação: Checa contagens, somas e integridade; interrompe se houver divergência.
     ]
   )
-]
-
-== Validação e Reconciliação OLTP vs. DW
-
-#[
-  #set text(0.8em)
-
-  Todos os 7 testes automáticos de integridade passaram:
 
   #v(0.15em)
-
-  #table(
-    columns: (1.75fr, 0.8fr, 0.8fr, 0.45fr),
-    align: (left, right, right, center),
-    [ Regra de Reconciliação ], [ Esperado (OLTP) ], [ Obtido (DW) ], [ Status ],
-    [ `revisions = fato_revisao + rejeitadas` ], [ 1.536.920 ], [ 1.536.920 ], [ *OK* ],
-    [ `pages = dim_pagina` ], [ 1.000.000 ], [ 1.000.000 ], [ *OK* ],
-    [ `wiki_references = fato_referencia + rejeitadas` ], [ 5.931.831 ], [ 5.931.831 ], [ *OK* ],
-    [ `SUM(qtd_revisoes) = COUNT(fato_revisao)` ], [ 1.536.920 ], [ 1.536.920 ], [ *OK* ],
-    [ `SUM(eh_primeira_revisao) = páginas c/ revisão` ], [ 1.000.000 ], [ 1.000.000 ], [ *OK* ],
-    [ Fatos órfãs de dimensão (`LEFT JOIN ... IS NULL`) ], [ 0 ], [ 0 ], [ *OK* ],
-    [ Continuidade de `dim_tempo` (`DATEDIFF + 1`) ], [ 10.170 ], [ 10.170 ], [ *OK* ],
-  )
+  - *Auditoria de Qualidade:* 7 regras automáticas de reconciliação com *100% de integridade* e *0 registros rejeitados*.
 ]
 
 = Consultas Analíticas (OLAP)
 
-== Consultas Analíticas e Principais Insights
+== Consultas Analíticas Executadas no DW
+
+#[
+  #set text(0.76em)
+
+  Foram desenvolvidas *10 consultas analíticas* (`sql/02_queries_olap.sql`), mapeando perguntas de negócio a recursos nativos de DW:
+
+  #v(0.15em)
+
+  #table(
+    columns: (0.4fr, 1.35fr, 1.15fr, 1.6fr),
+    align: (center, left, left, left),
+    [ ID ], [ Pergunta de Negócio ], [ Recurso OLAP ], [ O que a consulta realiza? ],
+    [ *Q1* ], [ Evolução histórica das edições ], [ `WITH ROLLUP` ], [ Subtotais automáticos por Ano e Trimestre em passada única ],
+    [ *Q2* ], [ Concentração e ranking de autoria ], [ `DENSE_RANK()`, Pareto ], [ Classifica autores e calcula percentual acumulado de produção ],
+    [ *Q3* ], [ Engajamento por área temática ], [ Agregação Dimensional ], [ Média de edições e tamanho dos textos por categoria ],
+    [ *Q4* ], [ Sazonalidade semanal ], [ `SUM() OVER ()` ], [ Distribuição percentual entre dias úteis e finais de semana ],
+    [ *Q5* ], [ Tendência histórica de produção ], [ Média Móvel (`ROWS`) ], [ Janela deslizante de 3 meses suavizando variações temporais ],
+    [ *Q6* ], [ Variação periódica de crescimento ], [ `LAG()` / `LEAD()` ], [ Compara o volume de revisões mês a mês (MoM) e ano a ano (YoY) ],
+    [ *Q9* ], [ Identificação dos artigos centrais ], [ Junção de Fatos ], [ Mapeia os verbetes de destino mais citados em `fato_referencia` ],
+  )
+]
+
+== Principais Resultados e Insights Extraídos
 
 #[
   #set text(0.77em)
-
-  Foram executadas *10 consultas OLAP* explorando `WITH ROLLUP`, `DENSE_RANK`, `LAG`/`LEAD`, médias móveis, `NTILE(4)` e a constelação de fatos:
-
-  #v(0.15em)
 
   #grid(
     columns: (1fr, 1fr),
@@ -279,86 +313,34 @@
   )
 
   #v(0.1em)
-  - *Padrão temporal (Q4, Q8, Q10):* distribuição semanal uniforme (\~14,3%/dia), pico em `2022-07` (10.419 edições) e maior volume na *Madrugada* (`35,08%`, média de `5.549` caracteres vs. `801` nos demais turnos).
+  - *Padrão temporal (Q4, Q8, Q10):* distribuição semanal uniforme (\~14,3%/dia), pico histórico em `2022-07` (10.419 edições) e maior volume na *Madrugada* (`35,08%`, com média de `5.549` caracteres vs. `801` nos demais turnos).
 ]
 
 = Benchmark: Banco Original vs. Data Warehouse
 
-== Metodologia Experimental do Teste
+== Metodologia e Resultados dos Testes (20x)
 
 #[
-  #set text(0.82em)
+  #set text(0.79em)
 
-  #grid(
-    columns: (1fr, 1fr),
-    gutter: 1em,
-    [
-      *Protocolo de medição:*
-      - *Mesmo ambiente:* Testes rodando no mesmo servidor para garantir igualdade
-      - *Amostragem:* *20 execuções consecutivas* em cada banco por consulta (para validar estabilidade)
-      - *Tempo limite:* `300 s` (5 minutos) por consulta
-      - *Dois cenários avaliados:*
-        1. *Cenário A:* Banco original sem índices secundários
-        2. *Cenário B:* Banco original com todos os índices secundários ativos
-    ],
-    [
-      *Por que Média, Mediana e P95?*
-      / Média: O tempo médio de todas as 20 rodadas.
-      / Mediana (P50): O tempo típico do sistema no dia a dia.
-      / P95: O pico de lentidão (mostra a estabilidade sob pressão de memória).
-    ]
-  )
+  Comparativo estatístico com *20 execuções consecutivas* por consulta no mesmo servidor MariaDB, extraindo Média, Mediana e P95 (pico de lentidão):
 
   #v(0.15em)
-  - *Consultas comparadas:* *B1* — Revisões por ano/mês | *B2* — Revisões por categoria temática | *B3* — Revisões por autor.
-]
 
-== Cenário A: Banco Original sem Índices Secundários (20x)
-
-#[
-  #set text(0.79em)
-
-  Sem índices secundários no banco original, consultas que cruzam tabelas grandes sofrem lentidão extrema:
-
-  #v(0.2em)
-
+  *Cenário A — Banco Original sem índices secundários (Impacto direto do DW):*
   #table(
-    columns: (1.4fr, 0.7fr, 0.7fr, 0.7fr, 0.65fr, 0.65fr, 0.65fr, 0.75fr, 0.75fr),
-    align: (left, right, right, right, right, right, right, right, right),
-    [ Consulta ], [ Original Méd. ], [ Original Med. ], [ Original P95 ], [ DW Méd. ], [ DW Med. ], [ DW P95 ], [ Ganho Med. ], [ Ganho P95 ],
-    [ *B1 — Ano/Mês* ], [ 9,05 s ], [ 4,64 s ], [ 25,07 s ], [ 3,26 s ], [ 2,76 s ], [ 3,31 s ], [ *1,7x* ], [ *7,6x* ],
-    [ *B2 — Categoria* ], [ > 300 s ], [ > 300 s ], [ > 300 s ], [ 4,49 s ], [ 4,17 s ], [ 4,69 s ], [ *> 72x* ], [ *> 64x* ],
-    [ *B3 — Autor* ], [ 11,37 s ], [ 7,89 s ], [ 25,15 s ], [ 2,79 s ], [ 2,65 s ], [ 2,95 s ], [ *3,0x* ], [ *8,5x* ],
+    columns: (1.6fr, 0.7fr, 0.7fr, 0.7fr, 0.65fr, 0.65fr, 0.75fr, 0.75fr),
+    align: (left, right, right, right, right, right, right, right),
+    [ Consulta ], [ Orig. Méd. ], [ Orig. Med. ], [ Orig. P95 ], [ DW Med. ], [ DW P95 ], [ Ganho Med. ], [ Ganho P95 ],
+    [ *B1 — Ano/Mês* ], [ 9,05 s ], [ 4,64 s ], [ 25,07 s ], [ 2,76 s ], [ 3,31 s ], [ *1,7x* ], [ *7,6x* ],
+    [ *B2 — Categoria* ], [ > 300 s ], [ > 300 s ], [ > 300 s ], [ 4,17 s ], [ 4,69 s ], [ *> 72x* ], [ *> 64x* ],
+    [ *B3 — Autor* ], [ 11,37 s ], [ 7,89 s ], [ 25,15 s ], [ 2,65 s ], [ 2,95 s ], [ *3,0x* ], [ *8,5x* ],
   )
 
-  #v(0.2em)
-
-  - *Eliminação de junções custosas (B2):* cruzar 3 tabelas estoura o limite de 5 minutos (> 300 s) no banco original; no DW responde em *4,17 s* (*mais de 72x mais rápido*).
-  - *Estabilidade previsível (P95):* nas outras consultas, o banco original teve picos de até 40 s; no DW a resposta é sempre estável abaixo de *3,3 s* (*7,6x a 8,5x mais rápido*).
-]
-
-== Cenário B: Banco Original com Índices Secundários (20x)
-
-#[
-  #set text(0.79em)
-
-  Com índices secundários ativos no banco original:
-
-  #v(0.2em)
-
-  #table(
-    columns: (1.4fr, 0.7fr, 0.7fr, 0.7fr, 0.65fr, 0.65fr, 0.65fr, 0.75fr, 0.75fr),
-    align: (left, right, right, right, right, right, right, right, right),
-    [ Consulta ], [ Original Méd. ], [ Original Med. ], [ Original P95 ], [ DW Méd. ], [ DW Med. ], [ DW P95 ], [ Ganho Méd. ], [ Ganho Med. ],
-    [ *B1 — Ano/Mês* ], [ 0,70 s ], [ 0,43 s ], [ 0,73 s ], [ 2,98 s ], [ 2,61 s ], [ 3,22 s ], [ 0,2x ], [ 0,2x ],
-    [ *B2 — Categoria* ], [ 5,04 s ], [ 3,92 s ], [ 5,33 s ], [ 4,02 s ], [ 3,78 s ], [ 4,12 s ], [ *1,3x* ], [ *1,0x* ],
-    [ *B3 — Autor* ], [ 0,44 s ], [ 0,29 s ], [ 0,45 s ], [ 2,54 s ], [ 2,53 s ], [ 2,60 s ], [ 0,2x ], [ 0,1x ],
-  )
-
-  #v(0.2em)
-
-  - *Entendendo B1 e B3:* em contagens simples de uma coluna, o banco original é rápido porque conta direto no índice (`COUNT(*)`). No DW, estamos somando métricas de negócio em cima da tabela inteira em tempo constante (\~2,5 s).
-  - *Vantagem do DW na análise temática (B2):* na primeira execução, o banco original levou *25,72 s* cruzando dados de links, contra *8,73 s* no DW, mantendo o DW *1,3x melhor na média e no P95*.
+  #v(0.1em)
+  *Cenário B — Banco Original com índices secundários ativos:*
+  - Em contagens simples de uma coluna (*B1* e *B3*), o banco original é rápido (`~0,4 s`) porque lê direto a árvore do índice (`COUNT(*)`). No DW, agregam-se métricas de negócio sobre a tabela inteira em tempo constante (`~2,5 s`).
+  - Na consulta com cruzamento de categorias (*B2*), o DW continua superior: a frio, o banco original levou *25,72 s* cruzando dados de links, contra *8,73 s* no DW, mantendo o DW *1,3x melhor na média e no P95*.
 ]
 
 == Síntese Comparativa e Conclusões
